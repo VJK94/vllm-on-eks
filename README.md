@@ -204,16 +204,42 @@ so idling costs nothing beyond the cluster itself.
 
 ```bash
 kubectl delete -f k8s/vllm/ -f k8s/karpenter/
-kubectl get nodeclaims                # must be empty before continuing
+kubectl get nodeclaims                # MUST be empty before continuing
+
+kubectl delete pvc -n monitoring --all   # BEFORE uninstalling anything
 helm uninstall dcgm-exporter -n gpu-operator
-helm uninstall monitoring -n monitoring && kubectl delete pvc -n monitoring --all
+helm uninstall monitoring -n monitoring
 helm uninstall nvdp karpenter karpenter-crd aws-load-balancer-controller -n kube-system
+
 cd terraform && terraform destroy
 ```
 
-Delete the NodePool **first** — Karpenter drains and terminates the nodes it
-owns, and those EC2 instances are in neither Terraform state nor a managed
-node group. Skipping this orphans running GPUs.
+Two ordering rules, both learned by getting them wrong:
+
+**Delete the NodePool first.** Karpenter drains and terminates the nodes it
+owns, and those instances are in neither Terraform state nor a managed node
+group. Skip this and you orphan running GPUs.
+
+**Delete PVCs while the EBS CSI driver is still alive.** The driver is what
+actually deletes the underlying volume; Terraform never knew it existed,
+because Kubernetes created it. Destroy the cluster first and you are left
+with a detached 10 GiB volume quietly billing forever.
+
+The general rule for anything a Kubernetes controller created — load
+balancers, Karpenter nodes, dynamically provisioned volumes: **delete the
+Kubernetes object while its controller is still running, then uninstall the
+controller, then destroy the infrastructure.**
+
+Verify:
+
+```bash
+aws ec2 describe-instances --region us-east-1 \
+  --filters "Name=instance-state-name,Values=running" \
+  --query 'Reservations[].Instances[].[InstanceId,InstanceType]' --output text
+aws ec2 describe-volumes --region us-east-1 \
+  --filters "Name=status,Values=available" \
+  --query 'Volumes[].[VolumeId,Size]' --output text
+```
 
 ## Design notes
 
