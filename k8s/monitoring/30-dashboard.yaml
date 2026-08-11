@@ -1,6 +1,11 @@
 # Dashboard as code: Grafana's sidecar auto-imports any ConfigMap labeled
-# grafana_dashboard=1. Top row is the SERVING layer (what users feel),
-# bottom row is the SILICON layer (what the money is doing).
+# grafana_dashboard=1. Top rows are the SERVING layer (what users feel),
+# bottom rows are the SILICON layer (what the money is doing).
+#
+# Every metric name below was verified against the running cluster:
+#   vLLM:  kubectl exec -n inference <pod> -- curl -s localhost:8000/metrics | grep '^# HELP'
+#   DCGM:  curl <prometheus>/api/v1/label/__name__/values
+# Guessing them is how you end up with a dashboard of empty panels.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -21,9 +26,9 @@ data:
           "type": "timeseries",
           "title": "Requests running vs waiting  (batch size / queue depth)",
           "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
-          "description": "num_requests_running IS the continuous-batching batch size. waiting > 0 sustained is the real scale-out signal - far better than CPU.",
+          "description": "num_requests_running IS the continuous-batching batch size. Sustained waiting > 0 is the real scale-out signal - far better than CPU.",
           "targets": [
-            { "expr": "sum(vllm:num_requests_running)", "legendFormat": "running (batch)" },
+            { "expr": "sum(vllm:num_requests_running)", "legendFormat": "running (batch size)" },
             { "expr": "sum(vllm:num_requests_waiting)", "legendFormat": "waiting (queue)" }
           ]
         },
@@ -32,15 +37,15 @@ data:
           "title": "KV cache utilization  (the real capacity ceiling)",
           "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
           "fieldConfig": { "defaults": { "unit": "percentunit", "max": 1 } },
-          "description": "Approaching 1.0 means preemption and queueing. This, not VRAM used, is how full the server actually is.",
+          "description": "Approaching 1.0 means preemption and queueing. This, not VRAM used, is how full the server actually is - VRAM looks 90% full at idle because vLLM pre-allocates.",
           "targets": [
-            { "expr": "sum(vllm:gpu_cache_usage_perc)", "legendFormat": "KV pool used" }
+            { "expr": "sum(vllm:kv_cache_usage_perc)", "legendFormat": "KV pool used" }
           ]
         },
         {
           "type": "timeseries",
           "title": "Time to first token  (prefill + queueing)",
-          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+          "gridPos": { "h": 8, "w": 8, "x": 0, "y": 8 },
           "fieldConfig": { "defaults": { "unit": "s" } },
           "targets": [
             { "expr": "histogram_quantile(0.50, sum(rate(vllm:time_to_first_token_seconds_bucket[5m])) by (le))", "legendFormat": "p50" },
@@ -49,9 +54,19 @@ data:
         },
         {
           "type": "timeseries",
-          "title": "Output throughput",
-          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
-          "fieldConfig": { "defaults": { "unit": "none" } },
+          "title": "Inter-token latency  (decode speed per stream)",
+          "gridPos": { "h": 8, "w": 8, "x": 8, "y": 8 },
+          "fieldConfig": { "defaults": { "unit": "s" } },
+          "description": "Rises as the batch grows - that is the throughput/latency tradeoff, visible.",
+          "targets": [
+            { "expr": "histogram_quantile(0.50, sum(rate(vllm:inter_token_latency_seconds_bucket[5m])) by (le))", "legendFormat": "p50" },
+            { "expr": "histogram_quantile(0.95, sum(rate(vllm:inter_token_latency_seconds_bucket[5m])) by (le))", "legendFormat": "p95" }
+          ]
+        },
+        {
+          "type": "timeseries",
+          "title": "Token throughput",
+          "gridPos": { "h": 8, "w": 8, "x": 16, "y": 8 },
           "targets": [
             { "expr": "sum(rate(vllm:generation_tokens_total[1m]))", "legendFormat": "output tok/s" },
             { "expr": "sum(rate(vllm:prompt_tokens_total[1m]))", "legendFormat": "prompt tok/s" }
@@ -59,23 +74,46 @@ data:
         },
         {
           "type": "timeseries",
-          "title": "GPU: SM activity vs tensor-core activity",
-          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+          "title": "WHY nvidia-smi LIES:  GPU-Util vs what the GPU is really doing",
+          "gridPos": { "h": 9, "w": 12, "x": 0, "y": 16 },
           "fieldConfig": { "defaults": { "unit": "percentunit", "max": 1 } },
-          "description": "What nvidia-smi cannot tell you. High DRAM + low tensor = memory-bound (normal for decode). Low both = starved: batch too small or a CPU bottleneck.",
+          "description": "GPU_UTIL is what nvidia-smi shows: the fraction of TIME a kernel was running. It says nothing about how much of the GPU was used. Compare it with GR_ENGINE_ACTIVE (compute engines busy), PIPE_TENSOR_ACTIVE (tensor cores - the fast path) and DRAM_ACTIVE (memory bandwidth). High DRAM with low tensor = memory-bound, which is NORMAL during decode. Low on all three while requests are running = starved: batch too small or a CPU bottleneck.",
           "targets": [
-            { "expr": "avg(DCGM_FI_PROF_SM_ACTIVE)", "legendFormat": "SM active" },
-            { "expr": "avg(DCGM_FI_PROF_PIPE_TENSOR_ACTIVE)", "legendFormat": "tensor cores" },
-            { "expr": "avg(DCGM_FI_PROF_DRAM_ACTIVE)", "legendFormat": "memory bandwidth" }
+            { "expr": "avg(DCGM_FI_DEV_GPU_UTIL) / 100", "legendFormat": "GPU_UTIL (what nvidia-smi shows)" },
+            { "expr": "avg(DCGM_FI_PROF_GR_ENGINE_ACTIVE)", "legendFormat": "compute engines active" },
+            { "expr": "avg(DCGM_FI_PROF_PIPE_TENSOR_ACTIVE)", "legendFormat": "tensor cores active" },
+            { "expr": "avg(DCGM_FI_PROF_DRAM_ACTIVE)", "legendFormat": "memory bandwidth active" }
           ]
         },
         {
           "type": "timeseries",
-          "title": "GPU: VRAM used and power draw",
-          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+          "title": "VRAM and power",
+          "gridPos": { "h": 9, "w": 12, "x": 12, "y": 16 },
+          "description": "VRAM sits ~90% full even at idle: vLLM PRE-ALLOCATES gpu-memory-utilization of the card as its KV block pool. Power draw is the more honest idle-vs-busy signal.",
           "targets": [
             { "expr": "avg(DCGM_FI_DEV_FB_USED)", "legendFormat": "VRAM used (MiB)" },
-            { "expr": "avg(DCGM_FI_DEV_POWER_USAGE)", "legendFormat": "power (W)" }
+            { "expr": "avg(DCGM_FI_DEV_FB_FREE)", "legendFormat": "VRAM free (MiB)" },
+            { "expr": "avg(DCGM_FI_DEV_POWER_USAGE)", "legendFormat": "power (W)" },
+            { "expr": "avg(DCGM_FI_DEV_GPU_TEMP)", "legendFormat": "temp (C)" }
+          ]
+        },
+        {
+          "type": "timeseries",
+          "title": "Preemptions  (KV cache exhaustion)",
+          "gridPos": { "h": 7, "w": 12, "x": 0, "y": 25 },
+          "description": "Non-zero means the KV pool filled and vLLM evicted a running sequence to recompute later. The signal that you are past capacity.",
+          "targets": [
+            { "expr": "sum(rate(vllm:num_preemptions_total[5m]))", "legendFormat": "preemptions/s" }
+          ]
+        },
+        {
+          "type": "timeseries",
+          "title": "Prefix cache hit rate",
+          "gridPos": { "h": 7, "w": 12, "x": 12, "y": 25 },
+          "fieldConfig": { "defaults": { "unit": "percentunit", "max": 1 } },
+          "description": "Shared prompt prefixes reuse KV blocks instead of recomputing them - a direct TTFT win when many requests share a system prompt.",
+          "targets": [
+            { "expr": "sum(rate(vllm:prefix_cache_hits_total[5m])) / clamp_min(sum(rate(vllm:prefix_cache_queries_total[5m])), 1)", "legendFormat": "hit rate" }
           ]
         }
       ]
