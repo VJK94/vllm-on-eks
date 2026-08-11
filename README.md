@@ -72,13 +72,63 @@ tokens/sec flattens. `--max-num-seqs=32` enforces the knee so excess requests
 queue instead of degrading everyone already being served; past it, you scale
 horizontally.
 
+### Does Kubernetes cost you throughput? No.
+
+The same model and GPU, benchmarked first on a bare EC2 instance and then on
+this cluster:
+
+| conc | TPOT (EC2 → EKS) | per-stream | aggregate tok/s |
+|---|---|---|---|
+| 1 | 19.6 → 19.4 ms | 50.9 → 51.4 | 50.8 → 49.8 |
+| 4 | 20.9 → 20.8 | 47.9 → 48.2 | 189.2 → 186.4 |
+| 16 | 29.0 → 28.8 | 34.4 → 34.7 | 535.6 → 531.9 |
+| 32 | 38.6 → 38.2 | 25.9 → 26.2 | 800.8 → 790.4 |
+
+Identical within 1.3%. Containerisation, the device plugin, Karpenter and the
+CNI cost **nothing** in GPU throughput.
+
+TTFT did rise ~70 ms (27 → 96 ms at concurrency 1), but that is a measurement
+artifact: this run was driven from a laptop through `kubectl port-forward`, so
+every request crosses the internet and the API server before reaching the pod.
+TTFT includes that round trip; TPOT does not, which is exactly why TPOT is
+unchanged. **Benchmark from inside the cluster if you want the server's real
+latency.**
+
+### What Kubernetes does cost: fixed overhead
+
+| | |
+|---|---|
+| GPU node (on-demand g4dn.xlarge) | $0.526/hr |
+| EKS control plane | $0.100 |
+| NAT gateway | $0.045 |
+| 2x t3.large spot (system) | $0.050 |
+| **total** | **$0.721/hr → $0.25 per 1M output tokens** |
+
+The same workload on one spot EC2 box costs **$0.11 per 1M**. So the platform
+roughly doubles cost per token — *at one GPU*. That inverts quickly:
+
+| GPUs | fixed overhead as % of spend |
+|---|---|
+| 1 | 27% |
+| 4 | 8.5% |
+| 10 | 3.6% |
+
+Kubernetes is a poor deal for a single GPU and an obvious one at ten. Worth
+being honest about rather than assuming orchestration is free.
+
+### Capacity: predicted, then confirmed twice
+
 Capacity was predicted before deploying and matched what vLLM computed:
 
-| | predicted | vLLM reported |
-|---|---|---|
-| KV cache pool | 8.9 GiB | 8.9 GiB |
-| Token capacity | ~73,000 | 72,928 |
-| Max concurrency @ 2048 | ~35 | 35.61x |
+| | predicted | vLLM on EC2 | vLLM on EKS |
+|---|---|---|---|
+| KV cache pool | 8.9 GiB | 8.9 GiB | 9.04 GiB |
+| Token capacity | ~73,000 | 72,928 | 74,048 |
+| Max concurrency @ 2048 | ~35 | 35.61x | 36.16x |
+
+The arithmetic is just usable VRAM, minus weights, minus overhead, divided by
+`2 × layers × kv_heads × head_dim × 2 bytes` per token. EKS came out marginally
+ahead — slightly less host-side overhead in the container.
 
 ## Deploy
 
