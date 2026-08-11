@@ -1,0 +1,20 @@
+# Required BEFORE installing kube-prometheus-stack — helm/monitoring-values.yaml
+# asks for a `gp3` StorageClass for Prometheus's TSDB volume, and without it
+# the operator silently refuses to create the StatefulSet:
+#   "sync monitoring/... failed: storage class \"gp3\" does not exist"
+# The symptom is confusing: alertmanager, grafana and node-exporter all come
+# up fine, there is simply NO Prometheus pod and no PVC, so every dashboard is
+# empty and every ServiceMonitor looks broken.
+#
+# The EBS CSI driver itself is installed by the eks module as an EKS addon;
+# this only names a class for it to provision from.
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: gp3
+provisioner: ebs.csi.aws.com
+volumeBindingMode: WaitForFirstConsumer # bind in the pod's AZ, not before
+reclaimPolicy: Delete
+parameters:
+  type: gp3
+  encrypted: "true"

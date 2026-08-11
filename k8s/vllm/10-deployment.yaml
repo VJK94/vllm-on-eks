@@ -17,6 +17,17 @@ spec:
     spec:
       serviceAccountName: vllm
 
+      # CRITICAL, and non-obvious. Kubernetes injects env vars for every
+      # Service into every pod: a Service named `vllm` produces
+      #   VLLM_PORT=tcp://10.100.x.x:8000
+      # vLLM reads VLLM_PORT as ITS OWN config and expects an integer, so it
+      # crashes at startup with a ValueError deep inside engine init. The
+      # traceback says "Engine core initialization failed", which points
+      # nowhere near the real cause.
+      # This never happens on Docker/EC2 — service links are a Kubernetes-only
+      # behaviour, so it only appears when you containerise onto a cluster.
+      enableServiceLinks: false
+
       # Permission to land on a GPU node. This only PERMITS — what actually
       # pulls the pod there is the nvidia.com/gpu request below, since only
       # GPU nodes advertise that resource.
@@ -48,10 +59,14 @@ spec:
               # whole card; no other pod can share it. It is also the only
               # place the resource may be set (requests is auto-mirrored).
               nvidia.com/gpu: 1
-              memory: 14Gi
+              memory: 12Gi
             requests:
-              cpu: "3"
-              memory: 10Gi
+              # Deliberately modest. The GPU does the work; the host mostly
+              # tokenizes and schedules. Requesting close to a 4-vCPU node's
+              # allocatable (after kube-reserved and DaemonSets) makes the pod
+              # unschedulable on exactly the cheap nodes we want.
+              cpu: "2"
+              memory: 8Gi
 
           # THE PROBE THAT MATTERS. Pulling a ~10 GB image, downloading
           # weights, loading them into VRAM and capturing CUDA graphs takes

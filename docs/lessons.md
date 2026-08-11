@@ -88,6 +88,94 @@ than we serve", and it needs KEDA or the Prometheus Adapter to reach an HPA.
 Even then, help takes 5–10 minutes to arrive, so the honest strategy is
 leading indicators plus warm headroom — not reactive scaling.
 
+## The one that cost the most time: Kubernetes injects Service env vars
+
+vLLM crashed at startup with a traceback ending in
+`RuntimeError: Engine core initialization failed`. The real cause was ten
+frames higher: `envs.VLLM_PORT` raising `ValueError`.
+
+Kubernetes automatically injects environment variables for every Service into
+every pod. A Service named `vllm` produces:
+
+```
+VLLM_PORT=tcp://172.20.56.185:8000
+```
+
+vLLM reads `VLLM_PORT` as **its own** configuration and expects an integer. It
+got a URL and died. The fix:
+
+```yaml
+spec:
+  enableServiceLinks: false
+```
+
+Two things make this worth remembering. First, it is **Kubernetes-only** — the
+identical container ran fine under Docker on EC2, because service links do not
+exist there. Porting a working container to a cluster introduced a failure
+that had nothing to do with the container. Second, the error message points
+nowhere near the cause; only reading up the traceback finds it.
+
+The general rule: **an app's config env vars can collide with Kubernetes
+service-link env vars, and the Service name decides whether they do.** Naming
+the Service something other than `vllm` would also have avoided it.
+
+## Spot capacity: diversify, then have an on-demand floor
+
+The first GPU NodePool pinned exactly one instance type, spot only, in two
+AZs — **two capacity pools**. Every launch failed with `UnfulfillableCapacity`
+from `CreateFleet` for the better part of an hour.
+
+Widening to six single-GPU types (g4dn/g5/g6, xlarge and 2xlarge) across four
+AZs made it 24 pools, and spot placement scores for the same AZs improved from
+1/10 to 4/10 purely from the wider type list. **It still was not enough** —
+GPU spot in us-east-1 was exhausted that evening.
+
+What actually worked was adding `on-demand` to the capacity-type requirement.
+Karpenter always prefers the cheapest offering, so this is spot-preferred with
+an on-demand floor, and a node launched in ~30 seconds.
+
+Lesson: for GPUs, spot-only is not a serving strategy. Diversify aggressively
+AND keep an on-demand fallback — and remember the two are **separate vCPU
+quotas** (`L-3819A6DF` spot, `L-DB2E81BA` on-demand); the fallback silently
+fails if only one is raised.
+
+Karpenter caches unavailable offerings, so between retries it reports
+"nodepool requirements filtered out all available instance types" — which
+sounds like a misconfiguration and is really "everything I know about is
+currently full". The launch error itself is in the
+`nodeclaim.lifecycle` controller logs.
+
+## Porting config between repos drops its dependencies
+
+`helm/monitoring-values.yaml` was copied from the source platform repo, where
+it asks for a `gp3` StorageClass. That StorageClass was defined in a manifest
+that did **not** get copied.
+
+The failure is quiet and misleading: alertmanager, Grafana, kube-state-metrics
+and node-exporter all come up healthy, and there is simply **no Prometheus pod
+and no PVC**. Every dashboard is empty, every ServiceMonitor looks broken, and
+nothing says why until you read the operator's own log:
+
+```
+sync "monitoring/..." failed: storage class "gp3" does not exist
+```
+
+Worse, creating the StorageClass afterwards is not enough — the operator had
+already given up and only retried after being restarted.
+
+## ServiceMonitor selectors fail silently
+
+The first `dcgm-exporter` ServiceMonitor used a guessed label
+(`app: nvidia-dcgm-exporter`); the real one is
+`app.kubernetes.io/name: dcgm-exporter`. Nothing errors. The ServiceMonitor
+exists, Prometheus just never scrapes anything, and the panels stay empty.
+
+Always verify against reality before writing the selector:
+
+```bash
+kubectl get svc -n <ns> --show-labels
+```
+
 ## Spot GPUs: the cost is recovery, not compute
 
 A spot g4dn was reclaimed 30 minutes into a session

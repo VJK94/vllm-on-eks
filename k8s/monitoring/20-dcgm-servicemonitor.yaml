@@ -15,8 +15,12 @@ spec:
   namespaceSelector:
     matchNames: [gpu-operator]
   selector:
+    # These must match the Service's ACTUAL labels — verify, do not guess:
+    #   kubectl get svc -n gpu-operator --show-labels
+    # A wrong selector fails silently: the ServiceMonitor exists, Prometheus
+    # simply never scrapes anything, and the panels stay empty.
     matchLabels:
-      app: nvidia-dcgm-exporter
+      app.kubernetes.io/name: dcgm-exporter
   endpoints:
-    - port: metrics
+    - port: metrics # the Service's port NAME, not its number
       interval: 15s

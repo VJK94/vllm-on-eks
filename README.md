@@ -98,13 +98,20 @@ helm repo add nvdp https://nvidia.github.io/k8s-device-plugin && helm repo updat
 helm install nvdp nvdp/nvidia-device-plugin -n kube-system --version 0.17.4 \
   --set-json 'tolerations=[{"key":"nvidia.com/gpu","operator":"Exists","effect":"NoSchedule"}]'
 
+# StorageClass FIRST — Prometheus asks for `gp3` and the operator silently
+# refuses to create its StatefulSet without it (no pod, no PVC, empty graphs).
+kubectl apply -f ../k8s/storage/
+
 helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
 helm install monitoring prometheus-community/kube-prometheus-stack \
   -n monitoring --create-namespace -f ../helm/monitoring-values.yaml
 
+# nodeSelector matters: without it the DaemonSet lands on CPU nodes too and
+# CrashLoopBackOffs there, since there is no GPU to talk to.
 helm repo add gpu-helm-charts https://nvidia.github.io/dcgm-exporter/helm-charts
 helm install dcgm-exporter gpu-helm-charts/dcgm-exporter -n gpu-operator --create-namespace \
-  --set-json 'tolerations=[{"key":"nvidia.com/gpu","operator":"Exists","effect":"NoSchedule"}]'
+  --set-json 'tolerations=[{"key":"nvidia.com/gpu","operator":"Exists","effect":"NoSchedule"}]' \
+  --set-json 'nodeSelector={"workload":"inference"}'
 
 # GPU capacity + the workload
 kubectl apply -f ../k8s/karpenter/
