@@ -1,0 +1,15 @@
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+crash.log
+crash.*.log
+*.tfplan
+.terraform.lock.hcl
+
+# never commit secrets
+*.auto.tfvars
+secrets.tfvars
+.env
+
+__pycache__/
+*.pyc

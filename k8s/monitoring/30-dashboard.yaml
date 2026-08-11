@@ -1,0 +1,82 @@
+# Dashboard as code: Grafana's sidecar auto-imports any ConfigMap labeled
+# grafana_dashboard=1. Top row is the SERVING layer (what users feel),
+# bottom row is the SILICON layer (what the money is doing).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dashboard-vllm-gpu
+  namespace: monitoring
+  labels:
+    grafana_dashboard: "1"
+data:
+  vllm-inference.json: |
+    {
+      "title": "vLLM on EKS - Serving + Silicon",
+      "uid": "vllm-on-eks",
+      "schemaVersion": 39,
+      "refresh": "10s",
+      "time": { "from": "now-30m", "to": "now" },
+      "panels": [
+        {
+          "type": "timeseries",
+          "title": "Requests running vs waiting  (batch size / queue depth)",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+          "description": "num_requests_running IS the continuous-batching batch size. waiting > 0 sustained is the real scale-out signal - far better than CPU.",
+          "targets": [
+            { "expr": "sum(vllm:num_requests_running)", "legendFormat": "running (batch)" },
+            { "expr": "sum(vllm:num_requests_waiting)", "legendFormat": "waiting (queue)" }
+          ]
+        },
+        {
+          "type": "timeseries",
+          "title": "KV cache utilization  (the real capacity ceiling)",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+          "fieldConfig": { "defaults": { "unit": "percentunit", "max": 1 } },
+          "description": "Approaching 1.0 means preemption and queueing. This, not VRAM used, is how full the server actually is.",
+          "targets": [
+            { "expr": "sum(vllm:gpu_cache_usage_perc)", "legendFormat": "KV pool used" }
+          ]
+        },
+        {
+          "type": "timeseries",
+          "title": "Time to first token  (prefill + queueing)",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+          "fieldConfig": { "defaults": { "unit": "s" } },
+          "targets": [
+            { "expr": "histogram_quantile(0.50, sum(rate(vllm:time_to_first_token_seconds_bucket[5m])) by (le))", "legendFormat": "p50" },
+            { "expr": "histogram_quantile(0.95, sum(rate(vllm:time_to_first_token_seconds_bucket[5m])) by (le))", "legendFormat": "p95" }
+          ]
+        },
+        {
+          "type": "timeseries",
+          "title": "Output throughput",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+          "fieldConfig": { "defaults": { "unit": "none" } },
+          "targets": [
+            { "expr": "sum(rate(vllm:generation_tokens_total[1m]))", "legendFormat": "output tok/s" },
+            { "expr": "sum(rate(vllm:prompt_tokens_total[1m]))", "legendFormat": "prompt tok/s" }
+          ]
+        },
+        {
+          "type": "timeseries",
+          "title": "GPU: SM activity vs tensor-core activity",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+          "fieldConfig": { "defaults": { "unit": "percentunit", "max": 1 } },
+          "description": "What nvidia-smi cannot tell you. High DRAM + low tensor = memory-bound (normal for decode). Low both = starved: batch too small or a CPU bottleneck.",
+          "targets": [
+            { "expr": "avg(DCGM_FI_PROF_SM_ACTIVE)", "legendFormat": "SM active" },
+            { "expr": "avg(DCGM_FI_PROF_PIPE_TENSOR_ACTIVE)", "legendFormat": "tensor cores" },
+            { "expr": "avg(DCGM_FI_PROF_DRAM_ACTIVE)", "legendFormat": "memory bandwidth" }
+          ]
+        },
+        {
+          "type": "timeseries",
+          "title": "GPU: VRAM used and power draw",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+          "targets": [
+            { "expr": "avg(DCGM_FI_DEV_FB_USED)", "legendFormat": "VRAM used (MiB)" },
+            { "expr": "avg(DCGM_FI_DEV_POWER_USAGE)", "legendFormat": "power (W)" }
+          ]
+        }
+      ]
+    }

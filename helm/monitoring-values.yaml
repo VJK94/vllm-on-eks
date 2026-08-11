@@ -1,0 +1,89 @@
+# Values for kube-prometheus-stack on OUR dev cluster (small, spot, EKS).
+# Install:
+#   helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+#   helm install monitoring prometheus-community/kube-prometheus-stack \
+#     -n monitoring --create-namespace -f helm/monitoring-values.yaml
+
+# ---------------------------------------------------------------------------
+# EKS reality check: the managed control plane doesn't expose etcd,
+# kube-scheduler, or kube-controller-manager for scraping. Leaving these on
+# means permanent dead targets + always-firing "XDown" alerts (alert fatigue
+# from day one). Disabling them is standard practice on EKS.
+# ---------------------------------------------------------------------------
+kubeEtcd:
+  enabled: false
+kubeScheduler:
+  enabled: false
+kubeControllerManager:
+  enabled: false
+kubeProxy:
+  enabled: false # binds metrics to 127.0.0.1 on EKS; not scrapable by default
+
+defaultRules:
+  rules:
+    etcd: false
+    kubeSchedulerAlerting: false
+    kubeSchedulerRecording: false
+    kubeControllerManager: false
+    kubeProxy: false
+
+# ---------------------------------------------------------------------------
+# Prometheus itself
+# ---------------------------------------------------------------------------
+prometheus:
+  prometheusSpec:
+    retention: 2d # dev: we destroy nightly anyway; prod would be weeks + remote storage
+
+    # Time-series DB on a real EBS volume via our gp3 StorageClass (week 2
+    # machinery earning its keep). Without this, metrics live in emptyDir
+    # and vanish on pod restart.
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          storageClassName: gp3
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              storage: 10Gi
+
+    # Biggest pod on the cluster — be honest about it (t3.medium = 4Gi node)
+    resources:
+      requests:
+        cpu: 200m
+        memory: 700Mi
+      limits:
+        memory: 1536Mi
+
+    # Without these, Prometheus ONLY watches ServiceMonitors/Rules carrying
+    # the helm release label. false = also pick up any in the cluster —
+    # simpler mental model while learning.
+    serviceMonitorSelectorNilUsesHelmValues: false
+    ruleSelectorNilUsesHelmValues: false
+
+alertmanager:
+  alertmanagerSpec:
+    resources:
+      requests:
+        cpu: 25m
+        memory: 64Mi
+      limits:
+        memory: 128Mi
+
+# ---------------------------------------------------------------------------
+# Grafana: no persistence (dashboards are provisioned from ConfigMaps =
+# dashboards-as-code; losing the pod loses nothing). Access via port-forward
+# — no public exposure, no ALB cost.
+# ---------------------------------------------------------------------------
+grafana:
+  adminPassword: mlplatform-dev # fine for a port-forwarded dev tool; prod = secret + SSO
+  persistence:
+    enabled: false
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      memory: 256Mi
+  sidecar:
+    dashboards:
+      enabled: true # auto-load any ConfigMap labeled grafana_dashboard=1

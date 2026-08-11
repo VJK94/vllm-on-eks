@@ -1,0 +1,19 @@
+# Tells Prometheus to scrape vLLM's own /metrics — the SERVING layer:
+# queue depth, KV cache usage, TTFT and TPOT histograms.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: vllm
+  namespace: monitoring
+  labels:
+    release: monitoring
+spec:
+  namespaceSelector:
+    matchNames: [inference]
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: vllm
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 15s

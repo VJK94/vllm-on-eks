@@ -1,0 +1,30 @@
+# The AWS half of the GPU NodePool: which AMI, subnets, security groups, and
+# node IAM role. Karpenter resolves the al2023 alias to the GPU-ACCELERATED
+# AMI variant when it launches a GPU instance type — that image ships the
+# NVIDIA kernel driver and the container toolkit, so the only thing left for
+# us to install is the device plugin.
+#
+# spec.role must equal: terraform output karpenter_node_role_name
+apiVersion: karpenter.k8s.aws/v1
+kind: EC2NodeClass
+metadata:
+  name: gpu
+spec:
+  amiSelectorTerms:
+    - alias: al2023@latest
+  role: vllm-eks-karpenter-node
+  subnetSelectorTerms:
+    - tags:
+        karpenter.sh/discovery: vllm-eks
+  securityGroupSelectorTerms:
+    - tags:
+        karpenter.sh/discovery: vllm-eks
+  blockDeviceMappings:
+    - deviceName: /dev/xvda
+      ebs:
+        # The vLLM image is ~10 GB and model weights are several more.
+        # The default 20 GiB fills immediately and the node never goes Ready.
+        volumeSize: 150Gi
+        volumeType: gp3
+        encrypted: true
+        deleteOnTermination: true

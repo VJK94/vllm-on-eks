@@ -1,0 +1,22 @@
+# Tells Prometheus to scrape DCGM exporter — the SILICON layer.
+#
+# This is the fix for the nvidia-smi lie: GPU-Util only means "a kernel was
+# running", not "the GPU was used". DCGM gives SM activity, tensor-core
+# activity and memory-bandwidth activity, which is what actually
+# distinguishes "memory-bound" from "starved".
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: dcgm-exporter
+  namespace: monitoring
+  labels:
+    release: monitoring
+spec:
+  namespaceSelector:
+    matchNames: [gpu-operator]
+  selector:
+    matchLabels:
+      app: nvidia-dcgm-exporter
+  endpoints:
+    - port: metrics
+      interval: 15s

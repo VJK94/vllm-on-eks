@@ -1,0 +1,53 @@
+# GPU capacity, provisioned on demand and protected from everything else.
+#
+# THE TAINT IS THE POINT: a g4dn.xlarge costs ~8x a t3.medium, so nothing
+# lands here unless it explicitly tolerates the taint AND requests a GPU.
+# Remember the direction rule — a toleration only PERMITS; what actually
+# attracts a pod here is asking for nvidia.com/gpu.
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: gpu
+spec:
+  template:
+    metadata:
+      labels:
+        workload: inference
+    spec:
+      nodeClassRef:
+        group: karpenter.k8s.aws
+        kind: EC2NodeClass
+        name: gpu
+
+      taints:
+        - key: nvidia.com/gpu
+          value: "true"
+          effect: NoSchedule
+
+      requirements:
+        - key: karpenter.sh/capacity-type
+          operator: In
+          values: ["spot"]
+        - key: node.kubernetes.io/instance-type
+          operator: In
+          values: ["g4dn.xlarge"]
+        - key: kubernetes.io/arch
+          operator: In
+          values: ["amd64"]
+
+      # A GPU node takes 5-10 minutes to become useful (image pull + weight
+      # load), so do not recycle it casually.
+      expireAfter: 168h
+
+  limits:
+    # HARD ceiling, and it matches the default G-family spot quota of 8 vCPU
+    # = exactly two g4dn.xlarge. Raise the AWS quota before raising this.
+    cpu: 8
+    nvidia.com/gpu: 2
+
+  disruption:
+    # WhenEmpty, not WhenEmptyOrUnderutilized: consolidating a GPU node means
+    # evicting a pod that needs 5-10 minutes to come back somewhere else.
+    # Underutilized is normal for inference; empty is the only safe signal.
+    consolidationPolicy: WhenEmpty
+    consolidateAfter: 5m

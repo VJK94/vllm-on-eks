@@ -1,0 +1,93 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm
+  namespace: inference
+  labels:
+    app.kubernetes.io/name: vllm
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: vllm
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: vllm
+    spec:
+      serviceAccountName: vllm
+
+      # Permission to land on a GPU node. This only PERMITS — what actually
+      # pulls the pod there is the nvidia.com/gpu request below, since only
+      # GPU nodes advertise that resource.
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+
+      containers:
+        - name: vllm
+          image: vllm/vllm-openai:latest
+          args:
+            - --model=TheBloke/Mistral-7B-Instruct-v0.2-AWQ
+            - --quantization=awq
+            - --dtype=half # T4 is Turing (cc 7.5) — no bfloat16
+            - --max-model-len=2048
+            - --gpu-memory-utilization=0.90
+            - --max-num-seqs=32 # the saturation knee measured in week 6
+            - --host=0.0.0.0
+            - --port=8000
+
+          ports:
+            - name: http
+              containerPort: 8000
+
+          resources:
+            limits:
+              # GPUs are INDIVISIBLE and NON-OVERCOMMITTABLE. This claims the
+              # whole card; no other pod can share it. It is also the only
+              # place the resource may be set (requests is auto-mirrored).
+              nvidia.com/gpu: 1
+              memory: 14Gi
+            requests:
+              cpu: "3"
+              memory: 10Gi
+
+          # THE PROBE THAT MATTERS. Pulling a ~10 GB image, downloading
+          # weights, loading them into VRAM and capturing CUDA graphs takes
+          # minutes. Without a startupProbe the liveness probe kills the pod
+          # mid-load, forever — CrashLoopBackOff on a healthy application.
+          # 90 x 10s = 15 minutes of grace before liveness even begins.
+          startupProbe:
+            httpGet: { path: /health, port: http }
+            periodSeconds: 10
+            failureThreshold: 90
+
+          readinessProbe:
+            httpGet: { path: /health, port: http }
+            periodSeconds: 10
+
+          livenessProbe:
+            httpGet: { path: /health, port: http }
+            periodSeconds: 20
+            failureThreshold: 3
+
+          volumeMounts:
+            - name: hf-cache
+              mountPath: /root/.cache/huggingface
+            - name: shm
+              mountPath: /dev/shm
+
+      volumes:
+        # Node-local weight cache. Pods rescheduled onto the SAME node skip
+        # the download; a new node pays for it again. That is the phase-1
+        # tradeoff, and the reason docs/cold-start.md exists.
+        - name: hf-cache
+          hostPath:
+            path: /opt/hf-cache
+            type: DirectoryOrCreate
+        # vLLM needs more shared memory than the 64 MB default.
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 2Gi
