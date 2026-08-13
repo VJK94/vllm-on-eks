@@ -241,6 +241,41 @@ aws ec2 describe-volumes --region us-east-1 \
   --query 'Volumes[].[VolumeId,Size]' --output text
 ```
 
+## When NOT to build this
+
+Measured afterwards, against Amazon Bedrock at its real published price for
+Llama-3.1-8B ($0.22 per 1M output tokens):
+
+| | utilization needed to beat Bedrock |
+|---|---|
+| bare EC2 spot | **52.7%** sustained |
+| this EKS platform | **115%** — mathematically impossible |
+| SageMaker endpoint | **225%** — impossible |
+
+Even at full saturation this stack costs $0.25 per 1M output tokens against
+Bedrock's $0.22 — and Bedrock served a comparable model roughly **3x faster**
+(145 vs 51 tok/s single-stream), because AWS runs it on far better silicon
+than a T4.
+
+So for an 8B-class model at ordinary volumes, **a managed per-token API wins
+on cost and latency**, and this repo is the wrong answer. Self-hosting earns
+its place when:
+
+- utilization is genuinely sustained and high, not bursty
+- the model is fine-tuned, private, or simply not in a vendor catalog
+- data residency or compliance rules out sending prompts to a third party
+- you need control over latency, batching or quantization that an API does
+  not expose
+
+One caveat on the arithmetic: throughput and hourly cost are **not**
+independent of model size, so you cannot rerun the comparison for a 70B by
+changing only the per-token price. A larger model needs different hardware
+at a different price and yields fewer tokens per second — all three inputs
+have to move together.
+
+The calculator is
+[here](https://github.com/VJK94/AI-ML-ops/blob/main/managed-inference/scripts/breakeven.py).
+
 ## Design notes
 
 Longer write-ups of the decisions that were not obvious:
